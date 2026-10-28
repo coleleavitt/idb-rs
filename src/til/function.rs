@@ -203,37 +203,29 @@ impl FunctionArgFlags {
 
 #[derive(Debug, Clone, Serialize)]
 pub enum ArgLoc {
-    // TODO add those to flags
-    // ::ALOC_STACK
-    // ::ALOC_STATIC
-    // ::ALOC_REG1
-    // ::ALOC_REG2
-    // ::ALOC_RREL
-    // ::ALOC_DIST
-    // ::ALOC_CUSTOM
     /// 0 - None
     None,
     /// 1 - stack offset
-    Stack(u32),
+    Stack(i64),
     /// 2 - distributed (scattered)
     Dist(Vec<ArgLocDist>),
-    /// 3 - one register (and offset within it)
-    Reg1(u32),
-    /// 4 - register pair
+    /// 3 - one register and the byte offset within it
+    Reg1 { reg: u16, off: u16 },
+    /// 4 - register pair, first register in bits 0..16, second in 16..32
     Reg2(u32),
     /// 5 - register relative
-    RRel { reg: u16, off: u32 },
+    RRel { reg: u16, off: i64 },
     /// 6 - global address
-    Static(u32),
-    // 7..=0xf custom
-    // TODO is possible to know the custom impl len?
+    Static(u64),
 }
 
+/// One part of a scattered argument.
 #[derive(Debug, Clone, Serialize)]
 pub struct ArgLocDist {
-    pub info: u16,
+    pub loc: ArgLoc,
+    /// offset of the part within the argument
     pub off: u16,
-    pub size: u16,
+    pub size: u32,
 }
 
 impl ArgLoc {
@@ -241,8 +233,11 @@ impl ArgLoc {
         let t: u8 = input.read_u8()?;
         if t != 0xFF {
             let b = t & 0x7F;
-            match (t, b) {
-                (0..=0x80, 1..) => Ok(Self::Reg1((b - 1).into())),
+            return match (t, b) {
+                (0..=0x80, 1..) => Ok(Self::Reg1 {
+                    reg: (b - 1).into(),
+                    off: 0,
+                }),
                 (0..=0x80, 0) => Ok(Self::Stack(0)),
                 _ => {
                     let c: u8 = bincode::deserialize_from(&mut *input)?;
@@ -252,56 +247,52 @@ impl ArgLoc {
                         Ok(Self::Reg2(u32::from(b) | u32::from(c - 1) << 16))
                     }
                 }
+            };
+        }
+        // Layout checked against IDA 9.1-9.5 `tinfo_t::serialize`: a dt of
+        // `0x80 | n` starts `n` scattered parts; otherwise the byte is
+        // `0x20 | ALOC_*` (dt values below 0x80 are stored as value + 1).
+        use super::flag::tf_func::argloc::*;
+        let kind = input.read_dt()?;
+        if let Some(parts) = kind.checked_sub(0x80) {
+            let parts = (0..parts)
+                .map(|_| {
+                    let loc = Self::read(&mut *input)?;
+                    let off = input.read_dt()?;
+                    let size = input.read_de()?;
+                    Ok(ArgLocDist { loc, off, size })
+                })
+                .collect::<Result<_>>()?;
+            return Ok(Self::Dist(parts));
+        }
+        let kind = kind + 1;
+        ensure!(kind & 0xF0 == 0x20, "Unknown ArgLoc kind {kind:#x}");
+        match (kind & 0xF) as u8 {
+            ALOC_STACK => Ok(Self::Stack(read_de64(input)? as i64)),
+            ALOC_REG1 => Ok(Self::Reg1 {
+                reg: input.read_dt()?,
+                off: input.read_dt()?,
+            }),
+            ALOC_REG2 => {
+                let reg1 = input.read_dt()?;
+                let reg2 = input.read_dt()?;
+                Ok(Self::Reg2(u32::from(reg1) | u32::from(reg2) << 16))
             }
-        } else {
-            use super::flag::tf_func::argloc::*;
-            let typ = input.read_dt()?;
-            match (typ & 0xF) as u8 {
-                ALOC_NONE => Ok(Self::None),
-                ALOC_STACK => {
-                    let sval = input.read_de()?;
-                    Ok(Self::Stack(sval))
-                }
-                ALOC_DIST => {
-                    let n = (typ >> 5) & 0x7;
-                    let dist: Vec<_> = (0..n)
-                        .map(|_| {
-                            let info = input.read_dt()?;
-                            let off = input.read_dt()?;
-                            let size = input.read_dt()?;
-                            Ok(ArgLocDist { info, off, size })
-                        })
-                        .collect::<Result<_>>()?;
-                    Ok(Self::Dist(dist))
-                }
-                ALOC_REG1 => {
-                    let reg_info = input.read_dt()?;
-                    // TODO read other dt?
-                    Ok(Self::Reg1(reg_info.into()))
-                }
-                ALOC_REG2 => {
-                    let reg_info = input.read_dt()?;
-                    // TODO read other dt?
-                    Ok(Self::Reg2(reg_info.into()))
-                }
-                ALOC_RREL => {
-                    let reg = input.read_dt()?;
-                    let off = input.read_de()?;
-                    Ok(Self::RRel { reg, off })
-                }
-                ALOC_STATIC => {
-                    let sval = input.read_de()?;
-                    Ok(Self::Static(sval))
-                }
-                #[cfg(feature = "restrictive")]
-                ALOC_CUSTOM.. => {
-                    Err(anyhow!("Custom implementation for ArgLoc"))
-                }
-                #[cfg(not(feature = "restrictive"))]
-                ALOC_CUSTOM.. => Ok(Self::None),
-            }
+            ALOC_RREL => Ok(Self::RRel {
+                reg: input.read_dt()?,
+                off: read_de64(input)? as i64,
+            }),
+            ALOC_STATIC => Ok(Self::Static(read_de64(input)?)),
+            other => Err(anyhow!("Unsupported ArgLoc type {other}")),
         }
     }
+}
+
+/// A 64-bit value stored as two `de`, low half first.
+fn read_de64(input: &mut impl IdbRead) -> Result<u64> {
+    let lo = input.read_de()?;
+    let hi = input.read_de()?;
+    Ok(u64::from(lo) | u64::from(hi) << 32)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

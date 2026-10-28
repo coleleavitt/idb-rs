@@ -2,6 +2,8 @@ use anyhow::{anyhow, ensure, Result};
 use flag::flags::inst_info::*;
 
 pub mod flag;
+mod sparse;
+pub use sparse::SparseFlags;
 
 use std::ops::{Div, Range, Rem};
 
@@ -13,6 +15,8 @@ use crate::{Address, IDAKind, SectionReader, VaVersion};
 #[derive(Clone, Debug)]
 pub struct ID1Section<K: IDAKind> {
     pub seglist: Vec<SegInfo<K>>,
+    /// Flags of the ranges without file data, 9.1+ databases only.
+    pub sparse: Option<SparseFlags>,
 }
 
 impl<K: IDAKind> SectionReader<K> for ID1Section<K> {
@@ -39,7 +43,7 @@ impl<K: IDAKind> ID1Section<K> {
 
         // sort segments by address
         let mut overlay_check = match &seglist_raw {
-            SegInfoRaw::VaN(segs) => {
+            SegInfoRaw::VaN(segs) | SegInfoRaw::VaXOffsets(segs) => {
                 segs.iter().map(|s| s.address.clone()).collect()
             }
             SegInfoRaw::VaX(segs) => segs.clone(),
@@ -105,6 +109,41 @@ impl<K: IDAKind> ID1Section<K> {
                     })
                     .collect::<Result<_>>()?
             }
+            SegInfoRaw::VaXOffsets(mut segs) => {
+                let mut body = Vec::new();
+                input.read_to_end(&mut body)?;
+                segs.sort_unstable_by_key(|s| s.address.start);
+                segs.into_iter()
+                    .map(|seg| {
+                        let to_usize = |v: K::Usize| {
+                            <K::Usize as TryInto<usize>>::try_into(v)
+                                .map_err(|_| anyhow!("ID1 value out of range"))
+                        };
+                        let start = to_usize(seg.offset)?
+                            .checked_sub(PAGE_SIZE)
+                            .ok_or_else(|| {
+                                anyhow!("ID1 range inside the header")
+                            })?;
+                        let len =
+                            to_usize(seg.address.end - seg.address.start)? * 4;
+                        let bytes = start
+                            .checked_add(len)
+                            .and_then(|end| body.get(start..end))
+                            .ok_or_else(|| {
+                                anyhow!("ID1 range past the section end")
+                            })?;
+                        Ok(SegInfo {
+                            offset: Address::from_raw(seg.address.start),
+                            data: bytes
+                                .as_chunks::<4>()
+                                .0
+                                .iter()
+                                .map(|b| u32::from_le_bytes(*b))
+                                .collect(),
+                        })
+                    })
+                    .collect::<Result<_>>()?
+            }
             SegInfoRaw::VaX(segs) => {
                 // the data for the segments are stored sequentialy in disk
                 segs.into_iter()
@@ -128,7 +167,10 @@ impl<K: IDAKind> ID1Section<K> {
         // deleted segment
         ignore_bytes(input, &mut buf)?;
 
-        Ok(Self { seglist })
+        Ok(Self {
+            seglist,
+            sparse: None,
+        })
     }
 
     fn read_header(
@@ -166,13 +208,28 @@ impl<K: IDAKind> ID1Section<K> {
                 Ok((u32::from(npages), SegInfoRaw::VaN(seglist)))
             }
             VaVersion::VaX => {
-                let unknown_always3 = input.read_u32()?;
-                ensure!(unknown_always3 == 3);
+                let kind = input.read_u32()?;
                 let nsegments = input.read_u32()?;
                 let unknown_always2048 = input.read_u32()?;
                 ensure!(unknown_always2048 == 2048);
                 let npages = input.read_u32()?;
 
+                if kind == 4 {
+                    let seglist = (0..nsegments)
+                        .map(|_| {
+                            let start = input.read_usize()?;
+                            let end = input.read_usize()?;
+                            ensure!(start <= end);
+                            let offset = input.read_usize()?;
+                            Ok(SegInfoVaNRaw {
+                                address: start..end,
+                                offset,
+                            })
+                        })
+                        .collect::<Result<_>>()?;
+                    return Ok((npages, SegInfoRaw::VaXOffsets(seglist)));
+                }
+                ensure!(kind == 3, "Unknown ID1 VA* kind {kind}");
                 let seglist = (0..nsegments)
                     // TODO the reference code uses the magic version, should it use
                     // the version itself instead?
@@ -224,12 +281,19 @@ impl<K: IDAKind> ID1Section<K> {
     }
 
     pub fn byte_by_address(&self, address: Address<K>) -> Option<ByteInfo> {
-        self.segment_by_address(address).map(|seg| {
-            let idx: usize = (address.into_raw() - seg.offset.into_raw())
-                .try_into()
-                .unwrap();
-            ByteInfo(seg.data[idx])
-        })
+        self.segment_by_address(address)
+            .map(|seg| {
+                let idx: usize = (address.into_raw() - seg.offset.into_raw())
+                    .try_into()
+                    .unwrap();
+                ByteInfo(seg.data[idx])
+            })
+            .or_else(|| {
+                self.sparse
+                    .as_ref()?
+                    .flags(address.into_raw().into())
+                    .map(ByteInfo)
+            })
     }
 
     pub fn all_bytes(
@@ -811,6 +875,10 @@ fn get_forced_operand<K: IDAKind>(
 enum SegInfoRaw<K: IDAKind> {
     VaN(Vec<SegInfoVaNRaw<K>>),
     VaX(Vec<Range<K::Usize>>),
+    /// `VA*` kind 4 (IDA 9.5): every range carries its byte offset in the
+    /// section. Ranges are not stored in address order, and the space between
+    /// them can hold stale data from ranges IDA moved.
+    VaXOffsets(Vec<SegInfoVaNRaw<K>>),
 }
 
 #[derive(Clone, Debug)]
