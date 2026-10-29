@@ -230,6 +230,11 @@ pub struct ArgLocDist {
 
 impl ArgLoc {
     fn read(input: &mut impl IdbRead) -> Result<Self> {
+        Self::read_inner(input, true)
+    }
+
+    /// A part of a scattered argument can't be scattered itself.
+    fn read_inner(input: &mut impl IdbRead, allow_dist: bool) -> Result<Self> {
         let t: u8 = input.read_u8()?;
         if t != 0xFF {
             let b = t & 0x7F;
@@ -255,9 +260,10 @@ impl ArgLoc {
         use super::flag::tf_func::argloc::*;
         let kind = input.read_dt()?;
         if let Some(parts) = kind.checked_sub(0x80) {
+            ensure!(allow_dist, "Nested scattered ArgLoc");
             let parts = (0..parts)
                 .map(|_| {
-                    let loc = Self::read(&mut *input)?;
+                    let loc = Self::read_inner(&mut *input, false)?;
                     let off = input.read_dt()?;
                     let size = input.read_de()?;
                     Ok(ArgLocDist { loc, off, size })
@@ -564,4 +570,17 @@ fn read_cc_spoiled(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ArgLoc;
+
+    #[test]
+    fn nested_scattered_arg_loc_is_an_error() {
+        // 0xFF, dt(0x81): one scattered part, whose location is again
+        // 0xFF, dt(0x81)
+        let data = [0xFF, 0x82, 0x01, 0xFF, 0x82, 0x01, 0x01, 0x01];
+        assert!(ArgLoc::read(&mut &data[..]).is_err());
+    }
 }
