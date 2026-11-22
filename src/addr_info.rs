@@ -221,7 +221,13 @@ impl<'a, K: IDAKind> AddressInfo<'a, K> {
             NALT_STRTYPE.into(),
             ARRAY_ALT_TAG,
         )?;
-        Some(StrType::from_code(*raw.first()?))
+        // the altval holds strtype + 1, so that 0 (a C string) is not absent
+        let value = raw
+            .iter()
+            .take(8)
+            .rev()
+            .fold(0u64, |acc, b| (acc << 8) | u64::from(*b));
+        Some(StrType::from_code(value.wrapping_sub(1) as u8))
     }
 
     pub fn tinfo(&self, info: &RootInfo<K>) -> Result<Option<Type>> {
