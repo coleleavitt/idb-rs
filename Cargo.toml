@@ -17,6 +17,7 @@ zstd = "0.13.3"
 rstest = "0.25.0"
 ron = "0.10.1"
 rustc-hash = "2.1.1"
+rusqlite = { version = "0.43.0", features = ["bundled"] }
 
 [features]
 default = []

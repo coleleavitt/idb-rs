@@ -48,6 +48,10 @@ use dump_dirtree_bookmarks_structplace::dump_dirtree_bookmarks_structplace;
 mod dump_dirtree_bookmarks_tiplace;
 use dump_dirtree_bookmarks_tiplace::dump_dirtree_bookmarks_tiplace;
 mod tilib;
+mod export_sqlite;
+use export_sqlite::export_sqlite;
+mod export_til_sqlite;
+use export_til_sqlite::export_til_sqlite;
 use idb_rs::id0::ID0Section;
 use idb_rs::id2::ID2Section;
 use idb_rs::nam::NamSection;
@@ -142,6 +146,11 @@ enum Operation {
     PrintTilib(PrintTilibArgs),
     /// Print a IDC file from the IDB database
     ProduceIdc(ProduceIdcArgs),
+    /// Write the database contents into a SQLite file
+    ExportSqlite(ExportSqliteArgs),
+    /// Write TIL files (or directories of them) into a SQLite file; the
+    /// input file argument is ignored
+    ExportTilSqlite(ExportTilSqliteArgs),
 }
 
 ///// Split the IDB file into it's decompressed sectors. Allow IDB and I64 files.
@@ -170,6 +179,26 @@ struct PrintTilibArgs {
 #[derive(Clone, Debug, Parser)]
 struct ProduceIdcArgs {
     banner: Vec<String>,
+}
+
+/// Export an IDB database to SQLite
+#[derive(Clone, Debug, Parser)]
+struct ExportSqliteArgs {
+    /// output SQLite file, replaced if it exists
+    output: PathBuf,
+    /// directory of Hex-Rays output, one `<name>.c` file per function
+    #[arg(long)]
+    pseudocode_dir: Option<PathBuf>,
+}
+
+/// Export TIL files to SQLite
+#[derive(Clone, Debug, Parser)]
+struct ExportTilSqliteArgs {
+    /// output SQLite file, replaced if it exists
+    output: PathBuf,
+    /// TIL files or directories searched recursively for `*.til`
+    #[arg(required = true)]
+    inputs: Vec<PathBuf>,
 }
 
 impl Args {
@@ -410,5 +439,11 @@ fn main() -> Result<()> {
         }
         Operation::PrintTilib(tilib_args) => tilib_print(&args, tilib_args),
         Operation::ProduceIdc(idc_args) => produce_idc(&args, idc_args),
+        Operation::ExportSqlite(export_args) => {
+            export_sqlite(&args, export_args)
+        }
+        Operation::ExportTilSqlite(export_args) => {
+            export_til_sqlite(export_args)
+        }
     }
 }

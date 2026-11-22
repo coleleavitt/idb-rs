@@ -1442,6 +1442,123 @@ fn print_til_struct_member_basic_att(
     Ok(())
 }
 
+/// Render a named TIL type as the C declaration `print-tilib` prints for it.
+pub(crate) fn type_decl(
+    name: &[u8],
+    idx: usize,
+    ty: &Type,
+    solver: &mut TILTypeSizeSolver<'_>,
+) -> Result<String> {
+    let mut buf = Vec::new();
+    print_til_type_root(
+        &mut buf,
+        &DEFAULT_TILIB_ARGS,
+        Some(name),
+        idx,
+        ty,
+        solver,
+    )?;
+    Ok(String::from_utf8_lossy(buf.trim_ascii_end()).into_owned())
+}
+
+/// Render a type with an optional declarator name, without a trailing `;`.
+pub(crate) fn named_decl(
+    name: Option<&[u8]>,
+    ty: &Type,
+    solver: &mut TILTypeSizeSolver<'_>,
+) -> Result<String> {
+    let mut buf = Vec::new();
+    if let TypeVariant::Bitfield(bitfield) = &ty.type_variant {
+        print_til_type_bitfield(&mut buf, name, ty, bitfield)?;
+    } else {
+        print_til_type(
+            &mut buf,
+            &DEFAULT_TILIB_ARGS,
+            0,
+            name,
+            ty,
+            false,
+            true,
+            true,
+            solver,
+        )?;
+    }
+    Ok(String::from_utf8_lossy(buf.trim_ascii_end()).into_owned())
+}
+
+/// Render a TIL symbol (function prototype or global) the way the
+/// `SYMBOLS` section of `print-tilib` does, without the size/value prefix.
+pub(crate) fn symbol_decl(
+    symbol: &TILTypeInfo,
+    solver: &mut TILTypeSizeSolver<'_>,
+) -> Result<String> {
+    let symbol_name = symbol.name.as_bytes();
+    let name = if symbol.ordinal == 0 && symbol_name.first() == Some(&b'_') {
+        &symbol_name[1..]
+    } else {
+        symbol_name
+    };
+    named_decl(Some(name), &symbol.tinfo, solver)
+}
+
+pub(crate) struct MemberLayout {
+    pub offset: u64,
+    pub bit_offset: Option<u64>,
+    /// size in bytes, or width in bits for a bitfield
+    pub size: u64,
+}
+
+/// Member offsets of a struct or union, computed the same way as
+/// `print_til_type_struct_layout`.
+pub(crate) fn udt_layout(
+    udt: &UDT,
+    is_union: bool,
+    solver: &mut TILTypeSizeSolver<'_>,
+) -> Vec<MemberLayout> {
+    let mut offset_calc = StructOffset::default();
+    udt.members
+        .iter()
+        .map(|member| {
+            if let TypeVariant::Bitfield(bitfield) =
+                &member.member_type.type_variant
+            {
+                let (bit_offset, offset) = if is_union {
+                    (0, 0)
+                } else {
+                    offset_calc.bitfield_offset(bitfield)
+                };
+                return MemberLayout {
+                    offset,
+                    bit_offset: Some(bit_offset),
+                    size: bitfield.width.into(),
+                };
+            }
+            let size = solver
+                .type_size_bytes(None, &member.member_type)
+                .unwrap_or(0);
+            let align = if udt.is_unaligned {
+                1
+            } else {
+                solver
+                    .type_align_bytes(None, &member.member_type, size)
+                    .or(member.alignment.map(NonZeroU8::get).map(u64::from))
+                    .unwrap_or(1)
+            };
+            let size = idb_rs::til::align_mem(size, align);
+            let offset = if is_union {
+                0
+            } else {
+                offset_calc.next_field(size, align)
+            };
+            MemberLayout {
+                offset,
+                bit_offset: None,
+                size,
+            }
+        })
+        .collect()
+}
+
 fn print_til_type_only(
     fmt: &mut impl Write,
     tinfo: &Type,
