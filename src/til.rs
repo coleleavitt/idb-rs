@@ -5,6 +5,7 @@ pub mod r#enum;
 pub mod flag;
 pub mod function;
 pub mod pointer;
+pub mod print;
 pub mod section;
 pub mod udt;
 

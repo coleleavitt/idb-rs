@@ -40,6 +40,7 @@
 #![forbid(unsafe_code)]
 pub mod addr_info;
 pub mod bytes_info;
+pub mod database;
 pub mod id0;
 pub mod id1;
 pub mod id2;

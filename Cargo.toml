@@ -7,22 +7,27 @@ license-file = "LICENSE"
 
 [dependencies]
 anyhow = { version = "1.0.86", features = ["backtrace"] }
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"], optional = true }
 bincode = "1.3.3"
 flate2 = "1.0.31"
 serde = { version = "1.0", features = ["derive"] }
 num_enum = "0.7.3"
 num-traits = "0.2.19"
 zstd = "0.13.3"
+rusqlite = { version = "0.43.0", features = ["bundled"], optional = true }
+
+[dev-dependencies]
+rustc-hash = "2.1.1"
 rstest = "0.25.0"
 ron = "0.10.1"
-rustc-hash = "2.1.1"
-rusqlite = { version = "0.43.0", features = ["bundled"] }
 
 [features]
 default = []
+# The `idb-tools` binary: its command line and the SQLite exports.
+tools = ["dep:clap", "dep:rusqlite"]
 restrictive = []
 
 [[bin]]
 name = "idb-tools"
 path = "src/tools/tools.rs"
+required-features = ["tools"]
